@@ -14,6 +14,7 @@ import (
 	"github.com/hieutdo/policyfs/internal/daemonctl"
 	"github.com/hieutdo/policyfs/internal/indexdb"
 	"github.com/hieutdo/policyfs/internal/router"
+	"github.com/hieutdo/policyfs/internal/errkind"
 	"github.com/rs/zerolog"
 )
 
@@ -95,6 +96,15 @@ func (n *Node) OpenCounts(ctx context.Context, files []daemonctl.OpenFileID) ([]
 func (n *Node) Lookup(ctx context.Context, name string, out *gofuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	rt, log := n.runtime()
 	ch, errno := lookupChild(ctx, n.EmbeddedInode(), n.RootData, n.mountName, n.state, n.reload, rt, n.db, log, n.disk, n.open, name, out)
+	parent := n.EmbeddedInode()
+
+	log.Debug().
+    Str("name", name).
+    Str("node_ptr", fmt.Sprintf("%p", n)).
+    Str("parent_ptr", fmt.Sprintf("%p", parent)).
+    Str("parent_path", parent.Path(parent.Root())).
+    Msg("Node.Lookup BEFORE lookupChild")
+
 	if errno != 0 && errno != syscall.ENOENT {
 		log.Error().Str("op", "lookup").Str("path", filepath.Join(n.Path(n.Root()), name)).Err(errno).Msg("failed to lookup")
 	}
@@ -312,4 +322,53 @@ func (n *Node) Setxattr(ctx context.Context, attr string, data []byte, flags uin
 // Removexattr rejects all xattrs on the virtual mount.
 func (n *Node) Removexattr(ctx context.Context, attr string) syscall.Errno {
 	return fs.ENOATTR
+}
+
+func (n *Node) Statx(
+	ctx context.Context,
+	f fs.FileHandle,
+	flags uint32,
+	mask uint32,
+	out *gofuse.StatxOut,
+) syscall.Errno {
+	if n == nil {
+		return toErrno(&errkind.NilError{What: "node"})
+	}
+
+	rt, log := n.runtime()
+	if rt == nil {
+		return toErrno(&errkind.NilError{What: "router"})
+	}
+
+	virtualPath := n.Path(n.Root())
+	if virtualPath == "." {
+		virtualPath = ""
+	}
+
+	if errno := validateVirtualPath(virtualPath); errno != 0 {
+		return errno
+	}
+
+	resolved, errno := resolveLookupPath(
+		ctx,
+		rt,
+		n.db,
+		log,
+		virtualPath,
+		"statx",
+		false,
+	)
+	if errno != 0 {
+		return errno
+	}
+
+	out.Size = resolved.attr.size
+	out.Mtime.Sec = resolved.attr.mtime
+	out.Mtime.Nsec = resolved.attr.mtimensec
+	out.Mode = uint16(resolved.attr.mode)
+	out.Nlink = uint32(resolved.attr.nlink)
+	out.Uid = uint32(resolved.attr.uid)
+	out.Gid = uint32(resolved.attr.gid)
+
+	return 0
 }
